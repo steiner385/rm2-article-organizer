@@ -16,6 +16,38 @@ echo -e "${BLUE}     reMarkable 2 Article Organizer - Remote Installer${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
 echo ""
 
+# Config directory for storing connection details
+CONFIG_DIR="$HOME/.config/rm2-article-organizer"
+CONFIG_FILE="$CONFIG_DIR/connection.conf"
+
+# Create config directory if it doesn't exist
+mkdir -p "$CONFIG_DIR"
+
+# Function to save connection details
+save_connection_details() {
+    local ip=$1
+    local save_pass=$2
+    local pass=$3
+    
+    echo "RM_IP=$ip" > "$CONFIG_FILE"
+    if [[ "$save_pass" == "y" ]]; then
+        # Simple obfuscation (base64) - not secure but prevents casual viewing
+        echo "RM_PASS=$(echo -n "$pass" | base64)" >> "$CONFIG_FILE"
+    fi
+    chmod 600 "$CONFIG_FILE"
+}
+
+# Function to load connection details
+load_connection_details() {
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        if [ -n "$RM_PASS" ]; then
+            # Decode the password
+            RM_PASS=$(echo -n "$RM_PASS" | base64 -d)
+        fi
+    fi
+}
+
 # Function to test SSH connection
 test_ssh_connection() {
     local host=$1
@@ -54,6 +86,11 @@ if [ -n "$MISSING_DEPS" ]; then
     exit 1
 fi
 
+# Load saved connection details
+load_connection_details
+SAVED_IP="$RM_IP"
+SAVED_PASS="$RM_PASS"
+
 # Get reMarkable connection details
 echo -e "${GREEN}Step 1: reMarkable Connection${NC}"
 echo -e "Please ensure your reMarkable is:"
@@ -61,24 +98,64 @@ echo -e "  • Connected to the same network as this computer"
 echo -e "  • SSH is enabled (Settings → Help → Developer mode)"
 echo ""
 
+# Check if we have saved credentials
+if [ -n "$SAVED_IP" ]; then
+    echo -e "${BLUE}Found saved connection details${NC}"
+fi
+
 # Get IP address
-read -p "Enter your reMarkable IP address: " RM_IP
-while [ -z "$RM_IP" ]; do
-    echo -e "${RED}IP address cannot be empty${NC}"
+if [ -n "$SAVED_IP" ]; then
+    read -p "Enter your reMarkable IP address [$SAVED_IP]: " RM_IP
+    RM_IP=${RM_IP:-$SAVED_IP}
+else
     read -p "Enter your reMarkable IP address: " RM_IP
-done
+    while [ -z "$RM_IP" ]; do
+        echo -e "${RED}IP address cannot be empty${NC}"
+        read -p "Enter your reMarkable IP address: " RM_IP
+    done
+fi
 
 # Get password
 echo ""
 echo -e "${YELLOW}The default password is shown in Settings → Help → Copyright notices${NC}"
-read -s -p "Enter your reMarkable password: " RM_PASS
-echo ""
+if [ -n "$SAVED_PASS" ]; then
+    echo -e "${BLUE}Using saved password (press Enter to use, or type new password)${NC}"
+    read -s -p "Enter your reMarkable password: " NEW_PASS
+    echo ""
+    if [ -z "$NEW_PASS" ]; then
+        RM_PASS="$SAVED_PASS"
+    else
+        RM_PASS="$NEW_PASS"
+    fi
+else
+    read -s -p "Enter your reMarkable password: " RM_PASS
+    echo ""
+fi
 
 # Test connection
 echo ""
 echo -e "${YELLOW}Testing connection to $RM_IP...${NC}"
 if test_ssh_connection "$RM_IP" "$RM_PASS"; then
     echo -e "${GREEN}✓ Connection successful!${NC}"
+    
+    # Ask to save credentials if not already saved
+    if [ "$RM_IP" != "$SAVED_IP" ] || [ "$RM_PASS" != "$SAVED_PASS" ]; then
+        echo ""
+        read -p "Save connection details for future use? [Y/n]: " SAVE_CREDS
+        SAVE_CREDS=${SAVE_CREDS:-Y}
+        if [[ "$SAVE_CREDS" =~ ^(y|yes|Y|YES)$ ]]; then
+            if command -v sshpass &> /dev/null; then
+                read -p "Save password (base64 encoded)? [y/N]: " SAVE_PASS
+                SAVE_PASS=${SAVE_PASS:-N}
+                SAVE_PASS=$(echo "$SAVE_PASS" | tr '[:upper:]' '[:lower:]')
+            else
+                SAVE_PASS="n"
+                echo -e "${YELLOW}Note: Password saving requires sshpass${NC}"
+            fi
+            save_connection_details "$RM_IP" "$SAVE_PASS" "$RM_PASS"
+            echo -e "${GREEN}Connection details saved to ~/.config/rm2-article-organizer/${NC}"
+        fi
+    fi
 else
     echo -e "${RED}✗ Failed to connect to reMarkable${NC}"
     echo -e "${RED}Please check:${NC}"
