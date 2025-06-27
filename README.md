@@ -23,7 +23,24 @@ Automatically organizes articles sent to your reMarkable 2 via the Chrome "Read 
 ### Important: Update-Persistent Installation
 This tool installs to `/home/root/` which persists across reMarkable system updates, unlike `/opt/` which gets wiped.
 
-### Steps
+### Method 1: Automated Remote Installation (Recommended)
+
+Use the remote installer script from your computer for a guided installation:
+
+```bash
+# Download and run the remote installer
+curl -O https://raw.githubusercontent.com/steiner385/rm2-article-organizer/main/remote_install.sh
+chmod +x remote_install.sh
+./remote_install.sh
+```
+
+The remote installer will:
+- Guide you through connection setup
+- Let you customize all configuration options
+- Handle file transfers automatically
+- Verify the installation
+
+### Method 2: Manual Installation
 
 1. **Enable SSH on your reMarkable 2**:
    - Settings → Help → Copyrights and licenses
@@ -40,19 +57,16 @@ This tool installs to `/home/root/` which persists across reMarkable system upda
    # Copy the Python script
    scp rm2_organizer.py root@YOUR_REMARKABLE_IP:/tmp/
    
-   # Copy the config file
-   scp rm2_organizer_config.json root@YOUR_REMARKABLE_IP:/tmp/
-   
    # Copy the installation script
-   scp install.sh root@YOUR_REMARKABLE_IP:/tmp/
+   scp rm2_organizer_install.sh root@YOUR_REMARKABLE_IP:/tmp/
    ```
 
 4. **Run the installation script**:
    ```bash
    ssh root@YOUR_REMARKABLE_IP
    cd /tmp
-   chmod +x install.sh
-   ./install.sh
+   chmod +x rm2_organizer_install.sh
+   ./rm2_organizer_install.sh
    ```
 
 ## File Locations (Update-Persistent)
