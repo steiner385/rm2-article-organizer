@@ -86,27 +86,149 @@ if [ -n "$MISSING_DEPS" ]; then
     exit 1
 fi
 
+# Function to detect and configure USB connection
+detect_usb_connection() {
+    echo -e "${YELLOW}Checking for USB connection...${NC}"
+    
+    # Common USB network interface patterns for reMarkable
+    USB_INTERFACES=$(ip link show | grep -E "enp[0-9]+s[0-9]+f[0-9]+u[0-9]+|usb[0-9]+|rndis[0-9]+" | cut -d: -f2 | tr -d ' ')
+    
+    if [ -z "$USB_INTERFACES" ]; then
+        return 1
+    fi
+    
+    for interface in $USB_INTERFACES; do
+        # Check if interface is up
+        if ip link show "$interface" | grep -q "state UP"; then
+            echo -e "${BLUE}Found USB interface: $interface${NC}"
+            
+            # Check if it already has the correct IP
+            if ip addr show "$interface" | grep -q "10.11.99.2"; then
+                echo -e "${GREEN}USB network already configured${NC}"
+                # Test connection
+                if ping -c 1 -W 1 10.11.99.1 &>/dev/null; then
+                    echo -e "${GREEN}✓ reMarkable detected on USB (10.11.99.1)${NC}"
+                    return 0
+                fi
+            else
+                # Try to configure the interface
+                echo -e "${YELLOW}Configuring USB network...${NC}"
+                if command -v sudo &> /dev/null; then
+                    sudo ip addr add 10.11.99.2/29 dev "$interface" 2>/dev/null || true
+                    
+                    # Give it a moment to settle
+                    sleep 1
+                    
+                    # Test connection
+                    if ping -c 1 -W 1 10.11.99.1 &>/dev/null; then
+                        echo -e "${GREEN}✓ USB network configured successfully${NC}"
+                        echo -e "${GREEN}✓ reMarkable detected on USB (10.11.99.1)${NC}"
+                        return 0
+                    fi
+                else
+                    echo -e "${YELLOW}Note: Need sudo to configure USB network automatically${NC}"
+                    echo -e "${YELLOW}Run: sudo ip addr add 10.11.99.2/29 dev $interface${NC}"
+                    return 1
+                fi
+            fi
+        fi
+    done
+    
+    return 1
+}
+
+# Function to scan for reMarkable on network
+scan_network() {
+    echo -e "${YELLOW}Scanning local network for reMarkable devices...${NC}"
+    
+    # Get local network subnet
+    LOCAL_NET=$(ip route | grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+" | grep -v "10.11.99" | head -1 | cut -d' ' -f1)
+    
+    if [ -z "$LOCAL_NET" ]; then
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Scanning $LOCAL_NET (this may take a moment)...${NC}"
+    
+    # Try common reMarkable ports
+    if command -v nmap &> /dev/null; then
+        FOUND_IPS=$(nmap -p 22 --open -oG - "$LOCAL_NET" 2>/dev/null | grep "22/open" | awk '{print $2}')
+    else
+        # Fallback: try a few common IPs
+        SUBNET_BASE=$(echo "$LOCAL_NET" | cut -d'.' -f1-3)
+        FOUND_IPS=""
+        for i in 1 100 101 102 103 200 201 202 203; do
+            if timeout 1 bash -c "echo >/dev/tcp/$SUBNET_BASE.$i/22" 2>/dev/null; then
+                FOUND_IPS="$FOUND_IPS $SUBNET_BASE.$i"
+            fi
+        done
+    fi
+    
+    # Test each found IP for reMarkable
+    for ip in $FOUND_IPS; do
+        if timeout 2 ssh -o StrictHostKeyChecking=no -o PasswordAuthentication=no root@"$ip" "test -f /usr/bin/xochitl" 2>/dev/null; then
+            echo -e "${GREEN}✓ Found reMarkable at $ip${NC}"
+            DETECTED_IP="$ip"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+# Detect reMarkable connection
+echo -e "${GREEN}Step 1: Detecting reMarkable Connection${NC}"
+echo ""
+
+DETECTED_IP=""
+USB_DETECTED=false
+
+# First, try USB
+if detect_usb_connection; then
+    DETECTED_IP="10.11.99.1"
+    USB_DETECTED=true
+    echo -e "${BLUE}Using USB connection${NC}"
+else
+    echo -e "${YELLOW}No USB connection found${NC}"
+fi
+
+# If no USB, try network scan
+if [ -z "$DETECTED_IP" ]; then
+    if scan_network; then
+        echo -e "${BLUE}Using WiFi connection${NC}"
+    else
+        echo -e "${YELLOW}Could not auto-detect reMarkable on network${NC}"
+    fi
+fi
+
+echo ""
+
 # Load saved connection details
 load_connection_details
 SAVED_IP="$RM_IP"
 SAVED_PASS="$RM_PASS"
 
 # Get reMarkable connection details
-echo -e "${GREEN}Step 1: reMarkable Connection${NC}"
+echo -e "${GREEN}Step 2: reMarkable Connection Details${NC}"
 echo -e "Please ensure your reMarkable is:"
 echo -e "  • Connected to the same network as this computer"
 echo -e "  • SSH is enabled (Settings → Help → Developer mode)"
 echo ""
 
-# Check if we have saved credentials
-if [ -n "$SAVED_IP" ]; then
-    echo -e "${BLUE}Found saved connection details${NC}"
+# Check if we have saved credentials or detected IP
+if [ -n "$SAVED_IP" ] || [ -n "$DETECTED_IP" ]; then
+    if [ -n "$DETECTED_IP" ] && [ "$DETECTED_IP" != "$SAVED_IP" ]; then
+        echo -e "${BLUE}Detected reMarkable at: $DETECTED_IP${NC}"
+    elif [ -n "$SAVED_IP" ]; then
+        echo -e "${BLUE}Found saved connection details${NC}"
+    fi
 fi
 
-# Get IP address
-if [ -n "$SAVED_IP" ]; then
-    read -p "Enter your reMarkable IP address [$SAVED_IP]: " RM_IP
-    RM_IP=${RM_IP:-$SAVED_IP}
+# Get IP address - prioritize detected IP, then saved IP
+DEFAULT_IP="${DETECTED_IP:-$SAVED_IP}"
+if [ -n "$DEFAULT_IP" ]; then
+    read -p "Enter your reMarkable IP address [$DEFAULT_IP]: " RM_IP
+    RM_IP=${RM_IP:-$DEFAULT_IP}
 else
     read -p "Enter your reMarkable IP address: " RM_IP
     while [ -z "$RM_IP" ]; do
@@ -168,7 +290,7 @@ fi
 
 # Configuration options
 echo ""
-echo -e "${GREEN}Step 2: Configuration Options${NC}"
+echo -e "${GREEN}Step 3: Configuration Options${NC}"
 echo -e "Press Enter to use defaults shown in [brackets]"
 echo ""
 
@@ -310,7 +432,7 @@ fi
 
 # Download files if not present locally
 echo ""
-echo -e "${GREEN}Step 3: Preparing Installation Files${NC}"
+echo -e "${GREEN}Step 4: Preparing Installation Files${NC}"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
@@ -336,7 +458,7 @@ fi
 
 # Copy files to reMarkable
 echo ""
-echo -e "${GREEN}Step 4: Copying Files to reMarkable${NC}"
+echo -e "${GREEN}Step 5: Copying Files to reMarkable${NC}"
 
 # Function to copy with password
 copy_with_pass() {
@@ -371,7 +493,7 @@ copy_with_pass /tmp/rm2_organizer_config.json /tmp/ || {
 
 # Run installation
 echo ""
-echo -e "${GREEN}Step 5: Running Installation${NC}"
+echo -e "${GREEN}Step 6: Running Installation${NC}"
 
 # Function to run command with password
 run_with_pass() {
@@ -398,7 +520,7 @@ run_with_pass "cd /tmp && ./rm2_organizer_install.sh" || {
 
 # Verify installation
 echo ""
-echo -e "${GREEN}Step 6: Verifying Installation${NC}"
+echo -e "${GREEN}Step 7: Verifying Installation${NC}"
 
 if run_with_pass "systemctl is-active rm2-organizer" | grep -q "active"; then
     echo -e "${GREEN}✓ Service is running${NC}"
