@@ -94,6 +94,7 @@ detect_usb_connection() {
     USB_INTERFACES=$(ip link show | grep -E "enp[0-9]+s[0-9]+f[0-9]+u[0-9]+|usb[0-9]+|rndis[0-9]+" | cut -d: -f2 | tr -d ' ')
     
     if [ -z "$USB_INTERFACES" ]; then
+        echo -e "${YELLOW}No USB network interface found${NC}"
         return 1
     fi
     
@@ -102,34 +103,54 @@ detect_usb_connection() {
         if ip link show "$interface" | grep -q "state UP"; then
             echo -e "${BLUE}Found USB interface: $interface${NC}"
             
-            # Check if it already has the correct IP
-            if ip addr show "$interface" | grep -q "10.11.99.2"; then
-                echo -e "${GREEN}USB network already configured${NC}"
-                # Test connection
-                if ping -c 1 -W 1 10.11.99.1 &>/dev/null; then
-                    echo -e "${GREEN}✓ reMarkable detected on USB (10.11.99.1)${NC}"
-                    return 0
+            # Try multiple possible IPs for reMarkable USB
+            local usb_ips=("10.11.99.1" "192.168.2.1")
+            local our_ips=("10.11.99.2/29" "192.168.2.2/24")
+            
+            for i in ${!usb_ips[@]}; do
+                local rm_ip="${usb_ips[$i]}"
+                local our_ip="${our_ips[$i]}"
+                
+                # Check if it already has an IP in this range
+                if ip addr show "$interface" | grep -q "${our_ip%/*}"; then
+                    echo -e "${BLUE}Testing existing config for $rm_ip...${NC}"
+                    if ping -c 1 -W 2 "$rm_ip" &>/dev/null; then
+                        echo -e "${GREEN}✓ reMarkable detected on USB ($rm_ip)${NC}"
+                        DETECTED_IP="$rm_ip"
+                        return 0
+                    fi
                 fi
-            else
-                # Try to configure the interface
-                echo -e "${YELLOW}Configuring USB network...${NC}"
-                if command -v sudo &> /dev/null; then
-                    sudo ip addr add 10.11.99.2/29 dev "$interface" 2>/dev/null || true
+            done
+            
+            # If no existing config worked, try to configure
+            echo -e "${YELLOW}Configuring USB network...${NC}"
+            if command -v sudo &> /dev/null; then
+                for i in ${!usb_ips[@]}; do
+                    local rm_ip="${usb_ips[$i]}"
+                    local our_ip="${our_ips[$i]}"
                     
-                    # Give it a moment to settle
+                    # Clear and add new IP
+                    sudo ip addr flush dev "$interface" 2>/dev/null || true
+                    sudo ip addr add "$our_ip" dev "$interface" 2>/dev/null || true
                     sleep 1
                     
                     # Test connection
-                    if ping -c 1 -W 1 10.11.99.1 &>/dev/null; then
+                    if ping -c 1 -W 2 "$rm_ip" &>/dev/null; then
                         echo -e "${GREEN}✓ USB network configured successfully${NC}"
-                        echo -e "${GREEN}✓ reMarkable detected on USB (10.11.99.1)${NC}"
+                        echo -e "${GREEN}✓ reMarkable detected on USB ($rm_ip)${NC}"
+                        DETECTED_IP="$rm_ip"
                         return 0
                     fi
-                else
-                    echo -e "${YELLOW}Note: Need sudo to configure USB network automatically${NC}"
-                    echo -e "${YELLOW}Run: sudo ip addr add 10.11.99.2/29 dev $interface${NC}"
-                    return 1
-                fi
+                done
+                
+                echo -e "${YELLOW}USB interface found but reMarkable not responding${NC}"
+                echo -e "${YELLOW}The reMarkable might be using WiFi instead${NC}"
+            else
+                echo -e "${YELLOW}Note: Need sudo to configure USB network automatically${NC}"
+                echo -e "${YELLOW}To configure manually:${NC}"
+                echo -e "${YELLOW}  sudo ip addr add 10.11.99.2/29 dev $interface${NC}"
+                echo -e "${YELLOW}  or${NC}"
+                echo -e "${YELLOW}  sudo ip addr add 192.168.2.2/24 dev $interface${NC}"
             fi
         fi
     done
@@ -142,37 +163,59 @@ scan_network() {
     echo -e "${YELLOW}Scanning local network for reMarkable devices...${NC}"
     
     # Get local network subnet
-    LOCAL_NET=$(ip route | grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+" | grep -v "10.11.99" | head -1 | cut -d' ' -f1)
+    LOCAL_NET=$(ip route | grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+" | grep -v "10.11.99" | grep -v "192.168.2" | head -1 | cut -d' ' -f1)
     
     if [ -z "$LOCAL_NET" ]; then
+        echo -e "${YELLOW}Could not determine local network${NC}"
         return 1
     fi
     
     echo -e "${YELLOW}Scanning $LOCAL_NET (this may take a moment)...${NC}"
     
+    # Extract subnet base
+    SUBNET_BASE=$(echo "$LOCAL_NET" | cut -d'.' -f1-3)
+    
     # Try common reMarkable ports
     if command -v nmap &> /dev/null; then
-        FOUND_IPS=$(nmap -p 22 --open -oG - "$LOCAL_NET" 2>/dev/null | grep "22/open" | awk '{print $2}')
+        # Use nmap for faster scanning
+        FOUND_IPS=$(nmap -p 22 -T4 --open -oG - "$LOCAL_NET" 2>/dev/null | grep "22/open" | awk '{print $2}')
     else
-        # Fallback: try a few common IPs
-        SUBNET_BASE=$(echo "$LOCAL_NET" | cut -d'.' -f1-3)
+        # Fallback: scan more comprehensively without nmap
         FOUND_IPS=""
-        for i in 1 100 101 102 103 200 201 202 203; do
-            if timeout 1 bash -c "echo >/dev/tcp/$SUBNET_BASE.$i/22" 2>/dev/null; then
-                FOUND_IPS="$FOUND_IPS $SUBNET_BASE.$i"
+        echo -e "${YELLOW}Scanning without nmap (this will take longer)...${NC}"
+        
+        # First try common DHCP ranges
+        for i in {100..150} {200..254} {2..50}; do
+            ip="$SUBNET_BASE.$i"
+            # Quick check if port 22 is open
+            if timeout 0.2 bash -c "echo >/dev/tcp/$ip/22" 2>/dev/null; then
+                FOUND_IPS="$FOUND_IPS $ip"
+                echo -e "${BLUE}Found SSH at $ip${NC}"
             fi
         done
     fi
     
     # Test each found IP for reMarkable
+    echo -e "${YELLOW}Testing ${FOUND_IPS:-no} SSH services for reMarkable...${NC}"
     for ip in $FOUND_IPS; do
-        if timeout 2 ssh -o StrictHostKeyChecking=no -o PasswordAuthentication=no root@"$ip" "test -f /usr/bin/xochitl" 2>/dev/null; then
-            echo -e "${GREEN}✓ Found reMarkable at $ip${NC}"
-            DETECTED_IP="$ip"
-            return 0
+        # First try a quick SSH banner check
+        banner=$(timeout 2 nc -w 1 "$ip" 22 2>/dev/null | head -1)
+        if [[ "$banner" == *"SSH"* ]]; then
+            # Now verify it's actually a reMarkable
+            if timeout 3 ssh -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o ConnectTimeout=2 root@"$ip" "test -f /usr/bin/xochitl" 2>/dev/null; then
+                echo -e "${GREEN}✓ Found reMarkable at $ip${NC}"
+                DETECTED_IP="$ip"
+                return 0
+            elif timeout 3 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 root@"$ip" "echo test" 2>&1 | grep -q "Permission denied"; then
+                # SSH works but needs password - likely a reMarkable
+                echo -e "${GREEN}✓ Found reMarkable at $ip (authentication required)${NC}"
+                DETECTED_IP="$ip"
+                return 0
+            fi
         fi
     done
     
+    echo -e "${YELLOW}No reMarkable devices found on network${NC}"
     return 1
 }
 
@@ -185,11 +228,11 @@ USB_DETECTED=false
 
 # First, try USB
 if detect_usb_connection; then
-    DETECTED_IP="10.11.99.1"
+    # DETECTED_IP is already set by detect_usb_connection
     USB_DETECTED=true
-    echo -e "${BLUE}Using USB connection${NC}"
+    echo -e "${BLUE}Using USB connection at $DETECTED_IP${NC}"
 else
-    echo -e "${YELLOW}No USB connection found${NC}"
+    echo -e "${YELLOW}No active USB connection found${NC}"
 fi
 
 # If no USB, try network scan
