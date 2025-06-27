@@ -76,6 +76,7 @@ if ! command -v sshpass &> /dev/null; then
     echo -e "${YELLOW}Note: sshpass not found. You'll need to enter your password multiple times.${NC}"
     echo -e "${YELLOW}Install sshpass for a smoother experience: ${NC}"
     echo -e "${YELLOW}  Ubuntu/Debian: sudo apt-get install sshpass${NC}"
+    echo -e "${YELLOW}  Arch/SteamOS: sudo pacman -S sshpass${NC}"
     echo -e "${YELLOW}  macOS: brew install hudochenkov/sshpass/sshpass${NC}"
     echo ""
 fi
@@ -300,8 +301,27 @@ fi
 # Test connection
 echo ""
 echo -e "${YELLOW}Testing connection to $RM_IP...${NC}"
-if test_ssh_connection "$RM_IP" "$RM_PASS"; then
+
+# Check if we can test the connection
+if [ -n "$RM_PASS" ] && ! command -v sshpass &> /dev/null; then
+    # Can't auto-test without sshpass, but check if host is reachable
+    if ping -c 1 -W 2 "$RM_IP" &>/dev/null; then
+        echo -e "${YELLOW}Host is reachable but can't auto-verify SSH without sshpass${NC}"
+        echo -e "${YELLOW}Proceeding with installation...${NC}"
+        CONNECTION_VERIFIED=true
+    else
+        echo -e "${RED}✗ Host $RM_IP is not reachable${NC}"
+        echo -e "${RED}Please check the IP address and network connection${NC}"
+        exit 1
+    fi
+elif test_ssh_connection "$RM_IP" "$RM_PASS"; then
     echo -e "${GREEN}✓ Connection successful!${NC}"
+    CONNECTION_VERIFIED=true
+else
+    CONNECTION_VERIFIED=false
+fi
+
+if [ "$CONNECTION_VERIFIED" = true ]; then
     
     # Ask to save credentials if not already saved
     if [ "$RM_IP" != "$SAVED_IP" ] || [ "$RM_PASS" != "$SAVED_PASS" ]; then
